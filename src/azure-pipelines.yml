@@ -4,24 +4,19 @@ trigger:
       - main
 
 variables:
-  # Azure Container Registry
-  dockerRegistryServiceConnection: 'service-to-registry'
-  imageRepository: 'jbpwregistrydemo'
-  containerRegistry: 'jbpwregistrydemo.azurecr.io'
+  ecrRepository: 'demo/py-ecr-demo'
   dockerfilePath: '$(Build.SourcesDirectory)/Dockerfile'
   tag: '$(Build.BuildId)'
 
-  # AWS deployment
   awsRegion: 'us-east-1'
   ecsClusterName: 'py-ecs-cluster-demo'
   ecsServiceName: 'py-ecs-service-demo'
 
-  # Azure agent
   vmImageName: 'ubuntu-latest'
 
 stages:
   - stage: Build
-    displayName: Build and Push CI Image
+    displayName: Validate, build, and push to ECR
     jobs:
       - job: Build
         displayName: Build
@@ -39,7 +34,6 @@ stages:
 
               python -m pip install --upgrade pip
               pip install flake8
-
               flake8 . \
                 --count \
                 --select=E9,F63,F7,F82 \
@@ -47,22 +41,50 @@ stages:
                 --statistics
             displayName: Run lint checks
 
-          - task: Docker@2
-            displayName: Build and push image to ACR
-            inputs:
-              command: buildAndPush
-              repository: $(imageRepository)
-              dockerfile: $(dockerfilePath)
-              containerRegistry: $(dockerRegistryServiceConnection)
-              tags: |
-                $(tag)
-                latest
+          - script: |
+              set -euo pipefail
+
+              ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+              ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+              IMAGE_URI="${ECR_REGISTRY}/$(ecrRepository):$(tag)"
+
+              echo "Verifying ECR repository $(ecrRepository)..."
+              aws ecr describe-repositories \
+                --repository-names "$(ecrRepository)" \
+                --region "${AWS_DEFAULT_REGION}" \
+                --output table
+
+              echo "Authenticating Docker to ${ECR_REGISTRY}..."
+              aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" \
+                | docker login \
+                    --username AWS \
+                    --password-stdin "${ECR_REGISTRY}"
+
+              echo "Building ${IMAGE_URI}..."
+              docker build \
+                --file "$(dockerfilePath)" \
+                --tag "${IMAGE_URI}" \
+                "$(Build.SourcesDirectory)"
+
+              docker push "${IMAGE_URI}"
+
+              echo "Verifying pushed image..."
+              aws ecr describe-images \
+                --repository-name "$(ecrRepository)" \
+                --image-ids "imageTag=$(tag)" \
+                --region "${AWS_DEFAULT_REGION}" \
+                --query 'imageDetails[0].{Digest:imageDigest,Tags:imageTags}' \
+                --output table
+            displayName: Build and push image to ECR
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              AWS_DEFAULT_REGION: $(awsRegion)
 
   - stage: Deploy
     displayName: Deploy to AWS ECS Fargate
     dependsOn: Build
     condition: succeeded()
-
     jobs:
       - job: Deploy
         displayName: Register task and update service
@@ -74,7 +96,9 @@ stages:
               set -euo pipefail
 
               TASK_DEFINITION_FILE="$(Build.SourcesDirectory)/taskdef.json"
-              FULL_IMAGE_URI="$(containerRegistry)/$(imageRepository):$(tag)"
+              ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+              ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+              FULL_IMAGE_URI="${ECR_REGISTRY}/$(ecrRepository):$(tag)"
 
               if [[ ! -f "${TASK_DEFINITION_FILE}" ]]; then
                 echo "##vso[task.logissue type=error]taskdef.json was not found."
@@ -86,48 +110,40 @@ stages:
                 exit 1
               fi
 
+              if jq -e '.containerDefinitions[] | has("repositoryCredentials")' \
+                "${TASK_DEFINITION_FILE}" >/dev/null; then
+                echo "##vso[task.logissue type=error]Remove repositoryCredentials from taskdef.json when using ECR."
+                exit 1
+              fi
+
               sed -i \
                 "s|IMAGE_PLACEHOLDER|${FULL_IMAGE_URI}|g" \
                 "${TASK_DEFINITION_FILE}"
 
-              echo "Deploying image: ${FULL_IMAGE_URI}"
-            displayName: Inject image tag
-
-          - script: |
-              set -euo pipefail
-
-              echo "Checking AWS authentication..."
-
-              aws sts get-caller-identity \
-                --query '{Account:Account,Arn:Arn}' \
-                --output table
-
-              echo "Registering task definition..."
-
+              echo "Registering task definition for ${FULL_IMAGE_URI}..."
               TASK_DEFINITION_ARN=$(
                 aws ecs register-task-definition \
-                  --cli-input-json \
-                  "file://$(Build.SourcesDirectory)/taskdef.json" \
+                  --cli-input-json "file://${TASK_DEFINITION_FILE}" \
                   --query 'taskDefinition.taskDefinitionArn' \
                   --output text
               )
 
-              echo "Registered task definition: ${TASK_DEFINITION_ARN}"
+              echo "Registered ${TASK_DEFINITION_ARN}"
 
               aws ecs update-service \
                 --cluster "$(ecsClusterName)" \
                 --service "$(ecsServiceName)" \
                 --task-definition "${TASK_DEFINITION_ARN}" \
-                --force-new-deployment
+                --force-new-deployment \
+                --output table
 
               echo "Waiting for the ECS service to stabilize..."
-
               aws ecs wait services-stable \
                 --cluster "$(ecsClusterName)" \
                 --services "$(ecsServiceName)"
 
               echo "Deployment completed."
-            displayName: Authenticate and deploy to ECS
+            displayName: Register task definition and deploy
             env:
               AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
               AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
