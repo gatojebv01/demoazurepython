@@ -1,7 +1,7 @@
 {
   "family": "python-demo-task",
   
-  "executionRoleArn": "arn:aws:account::975050185952:role/ecsTaskExecutionRole",
+  "executionRoleArn": "arn:aws:iam::975050185952:role/ecsTaskExecutionRole",
   "networkMode": "awsvpc",
   "requiresCompatibilities": [
     "FARGATE"
