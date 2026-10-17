@@ -57,35 +57,23 @@ stages:
   - stage: Deploy
     displayName: Deploy to AWS ECS Fargate
     dependsOn: Build
-    condition: succeeded()
     jobs:
       - job: Deploy
         pool:
-          vmImage: $(vmImageName)
+          vmImage: 'ubuntu-latest'
         steps:
-          # Replace placeholder with the exact container image URL and Build ID tag
+          # Inject target build ID into the file
           - script: |
               FULL_IMAGE_URI="$(containerRegistry)/$(imageRepository):$(tag)"
-              echo "Injecting image target: $FULL_IMAGE_URI"
               sed -i "s|IMAGE_PLACEHOLDER|$FULL_IMAGE_URI|g" $(Build.SourcesDirectory)/taskdef.json
-            displayName: 'Inject Runtime Image Tag into Task Definition'
+            displayName: 'Inject Runtime Image Tag'
 
-          # Register the updated task definition to AWS
-          - task: AWSCLI@1
-            displayName: Register Fargate Task Definition
-            inputs:
-              awsCredentials: $(awsServiceConnection)
-              regionName: $(awsRegion)
-              awsCommand: 'ecs'
-              awsSubCommand: 'register-task-definition'
-              arguments: '--cli-input-json file://$(Build.SourcesDirectory)/taskdef.json'
-          
-          # Force Fargate to pick up the updated configuration and cycle containers smoothly
-          - task: AWSCLI@1
-            displayName: Force Deploy Service Update to Fargate
-            inputs:
-              awsCredentials: $(awsServiceConnection)
-              regionName: $(awsRegion)
-              awsCommand: 'ecs'
-              awsSubCommand: 'update-service'
-              arguments: '--cluster $(ecsClusterName) --service $(ecsServiceName) --task-definition python-demo-task --force-new-deployment'
+          # Run raw AWS CLI commands using your mapped pipeline variables
+          - script: |
+              aws ecs register-task-definition --cli-input-json file://$(Build.SourcesDirectory)/taskdef.json
+              aws ecs update-service --cluster $(ecsClusterName) --service $(ecsServiceName) --task-definition python-demo-task --force-new-deployment
+            displayName: 'Deploy via AWS CLI'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              AWS_DEFAULT_REGION: $(AWS_DEFAULT_REGION)
