@@ -1,0 +1,38 @@
+{
+  "family": "python-demo-task",
+  
+  "executionRoleArn": "arn:aws:account::975050185952:role/ecsTaskExecutionRole",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "256",
+  "memory": "512",
+  "containerDefinitions": [
+    {
+      "name": "python-demo-website",
+      "image": "IMAGE_PLACEHOLDER",
+      "cpu": 256,
+      "memory": 512,
+      "portMappings": [
+        {
+          "containerPort": 8080,
+          "hostPort": 8080,
+          "protocol": "tcp"
+        }
+      ],
+      "essential": true,
+      "environment": [],
+      "secrets": [
+        {
+          "name": "MY_SECRET_WORD_1",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:975050185952:secret:PythonDemoSecret-6RvZvQ:MY_SECRET_WORD_1::"
+        },
+        {
+          "name": "MY_SECRET_WORD_2",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:975050185952:secret:PythonDemoSecret-6RvZvQ:MY_SECRET_WORD_2::"
+        }
+      ]
+    }
+  ]
+}
