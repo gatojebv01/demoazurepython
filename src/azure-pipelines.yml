@@ -13,8 +13,8 @@ variables:
 
   # AWS deployment
   awsRegion: 'us-east-1'
-  ecsClusterName: 'py-ecs-cluster-demo1'
-  ecsServiceName: 'py-ecs-service-demo1'
+  ecsClusterName: 'py-ecs-cluster-demo'
+  ecsServiceName: 'py-ecs-service-demo'
 
   # Azure agent
   vmImageName: 'ubuntu-latest'
