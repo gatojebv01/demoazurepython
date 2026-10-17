@@ -54,26 +54,55 @@ stages:
               tags: |
                 $(tag)
                 latest
-  - stage: Deploy
-    displayName: Deploy to AWS ECS Fargate
-    dependsOn: Build
-    jobs:
-      - job: Deploy
-        pool:
-          vmImage: 'ubuntu-latest'
-        steps:
-          # Inject target build ID into the file
-          - script: |
-              FULL_IMAGE_URI="$(containerRegistry)/$(imageRepository):$(tag)"
-              sed -i "s|IMAGE_PLACEHOLDER|$FULL_IMAGE_URI|g" $(Build.SourcesDirectory)/taskdef.json
-            displayName: 'Inject Runtime Image Tag'
+ - stage: Deploy
+  displayName: Deploy to AWS ECS Fargate
+  dependsOn: Build
+  jobs:
+    - job: Deploy
+      pool:
+        vmImage: ubuntu-latest
 
-          # Run raw AWS CLI commands using your mapped pipeline variables
-          - script: |
-              aws ecs register-task-definition --cli-input-json file://$(Build.SourcesDirectory)/taskdef.json
-              aws ecs update-service --cluster $(ecsClusterName) --service $(ecsServiceName) --task-definition python-demo-task --force-new-deployment
-            displayName: 'Deploy via AWS CLI'
-            env:
-              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
-              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
-              AWS_DEFAULT_REGION: $(AWS_DEFAULT_REGION)
+      steps:
+        - script: |
+            set -euo pipefail
+
+            FULL_IMAGE_URI="$(containerRegistry)/$(imageRepository):$(tag)"
+
+            sed -i \
+              "s|IMAGE_PLACEHOLDER|${FULL_IMAGE_URI}|g" \
+              "$(Build.SourcesDirectory)/taskdef.json"
+          displayName: Inject image tag
+
+        - script: |
+            set -euo pipefail
+
+            echo "Checking AWS authentication..."
+            aws sts get-caller-identity \
+              --query '{Account:Account,Arn:Arn}' \
+              --output table
+
+            echo "Registering task definition..."
+            TASK_DEFINITION_ARN=$(
+              aws ecs register-task-definition \
+                --cli-input-json \
+                "file://$(Build.SourcesDirectory)/taskdef.json" \
+                --query 'taskDefinition.taskDefinitionArn' \
+                --output text
+            )
+
+            echo "Registered: ${TASK_DEFINITION_ARN}"
+
+            aws ecs update-service \
+              --cluster "$(ecsClusterName)" \
+              --service "$(ecsServiceName)" \
+              --task-definition "${TASK_DEFINITION_ARN}" \
+              --force-new-deployment
+
+            aws ecs wait services-stable \
+              --cluster "$(ecsClusterName)" \
+              --services "$(ecsServiceName)"
+          displayName: Authenticate and deploy to ECS
+          env:
+            AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+            AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+            AWS_DEFAULT_REGION: $(awsRegion)
