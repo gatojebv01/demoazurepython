@@ -12,6 +12,12 @@ variables:
   dockerfilePath: '$(Build.SourcesDirectory)/Dockerfile'
   tag: '$(Build.BuildId)' # Automatically numbers the image version using the build ID
 
+    # AWS Deployment Variables
+  awsServiceConnection: 'your-aws-service-connection-name'
+  awsRegion: 'us-east-1'
+  ecsClusterName: 'py-ecs-cluster-demo'
+  ecsServiceName: 'py-ecs-service-demo'
+  
   # Agent VM image
   vmImageName: 'ubuntu-latest'
 
@@ -48,3 +54,38 @@ stages:
               tags: |
                 $(tag)
                 latest
+  - stage: Deploy
+    displayName: Deploy to AWS ECS Fargate
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - job: Deploy
+        pool:
+          vmImage: $(vmImageName)
+        steps:
+          # Replace placeholder with the exact container image URL and Build ID tag
+          - script: |
+              FULL_IMAGE_URI="$(containerRegistry)/$(imageRepository):$(tag)"
+              echo "Injecting image target: $FULL_IMAGE_URI"
+              sed -i "s|IMAGE_PLACEHOLDER|$FULL_IMAGE_URI|g" $(Build.SourcesDirectory)/taskdef.json
+            displayName: 'Inject Runtime Image Tag into Task Definition'
+
+          # Register the updated task definition to AWS
+          - task: AWSCLI@1
+            displayName: Register Fargate Task Definition
+            inputs:
+              awsCredentials: $(awsServiceConnection)
+              regionName: $(awsRegion)
+              awsCommand: 'ecs'
+              awsSubCommand: 'register-task-definition'
+              arguments: '--cli-input-json file://$(Build.SourcesDirectory)/taskdef.json'
+          
+          # Force Fargate to pick up the updated configuration and cycle containers smoothly
+          - task: AWSCLI@1
+            displayName: Force Deploy Service Update to Fargate
+            inputs:
+              awsCredentials: $(awsServiceConnection)
+              regionName: $(awsRegion)
+              awsCommand: 'ecs'
+              awsSubCommand: 'update-service'
+              arguments: '--cluster $(ecsClusterName) --service $(ecsServiceName) --task-definition python-demo-task --force-new-deployment'
