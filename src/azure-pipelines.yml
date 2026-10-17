@@ -1,24 +1,22 @@
 trigger:
-  - main # Triggers the pipeline automatically when code is pushed to the main branch
-
-resources:
-  - repo: self
+  branches:
+    include:
+      - main
 
 variables:
-  # Update these with your service connection, registry, and image details
+  # Azure Container Registry
   dockerRegistryServiceConnection: 'service-to-registry'
   imageRepository: 'jbpwregistrydemo'
   containerRegistry: 'jbpwregistrydemo.azurecr.io'
   dockerfilePath: '$(Build.SourcesDirectory)/Dockerfile'
-  tag: '$(Build.BuildId)' # Automatically numbers the image version using the build ID
+  tag: '$(Build.BuildId)'
 
-    # AWS Deployment Variables
-  awsServiceConnection: 'your-aws-service-connection-name'
+  # AWS deployment
   awsRegion: 'us-east-1'
   ecsClusterName: 'py-ecs-cluster-demo1'
   ecsServiceName: 'py-ecs-service-demo1'
-  
-  # Agent VM image
+
+  # Azure agent
   vmImageName: 'ubuntu-latest'
 
 stages:
@@ -29,80 +27,108 @@ stages:
         displayName: Build
         pool:
           vmImage: $(vmImageName)
+
         steps:
-          # Optional: Lint or test your Python code before building the image
           - task: UsePythonVersion@0
+            displayName: Use Python 3.11
             inputs:
               versionSpec: '3.11'
-            displayName: 'Use Python 3.11'
 
           - script: |
+              set -euo pipefail
+
               python -m pip install --upgrade pip
               pip install flake8
-              # Stop the build if there are Python syntax errors or undefined names
-              flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-            displayName: 'Run Lint Checks'
 
-          # Build and push the Docker image to Azure Container Registry
+              flake8 . \
+                --count \
+                --select=E9,F63,F7,F82 \
+                --show-source \
+                --statistics
+            displayName: Run lint checks
+
           - task: Docker@2
-            displayName: Build and Push Image to ACR
+            displayName: Build and push image to ACR
             inputs:
-              command: 'buildAndPush'
+              command: buildAndPush
               repository: $(imageRepository)
               dockerfile: $(dockerfilePath)
               containerRegistry: $(dockerRegistryServiceConnection)
               tags: |
                 $(tag)
                 latest
- - stage: Deploy
-  displayName: Deploy to AWS ECS Fargate
-  dependsOn: Build
-  jobs:
-    - job: Deploy
-      pool:
-        vmImage: ubuntu-latest
 
-      steps:
-        - script: |
-            set -euo pipefail
+  - stage: Deploy
+    displayName: Deploy to AWS ECS Fargate
+    dependsOn: Build
+    condition: succeeded()
 
-            FULL_IMAGE_URI="$(containerRegistry)/$(imageRepository):$(tag)"
+    jobs:
+      - job: Deploy
+        displayName: Register task and update service
+        pool:
+          vmImage: $(vmImageName)
 
-            sed -i \
-              "s|IMAGE_PLACEHOLDER|${FULL_IMAGE_URI}|g" \
-              "$(Build.SourcesDirectory)/taskdef.json"
-          displayName: Inject image tag
+        steps:
+          - script: |
+              set -euo pipefail
 
-        - script: |
-            set -euo pipefail
+              TASK_DEFINITION_FILE="$(Build.SourcesDirectory)/taskdef.json"
+              FULL_IMAGE_URI="$(containerRegistry)/$(imageRepository):$(tag)"
 
-            echo "Checking AWS authentication..."
-            aws sts get-caller-identity \
-              --query '{Account:Account,Arn:Arn}' \
-              --output table
+              if [[ ! -f "${TASK_DEFINITION_FILE}" ]]; then
+                echo "##vso[task.logissue type=error]taskdef.json was not found."
+                exit 1
+              fi
 
-            echo "Registering task definition..."
-            TASK_DEFINITION_ARN=$(
-              aws ecs register-task-definition \
-                --cli-input-json \
-                "file://$(Build.SourcesDirectory)/taskdef.json" \
-                --query 'taskDefinition.taskDefinitionArn' \
-                --output text
-            )
+              if ! grep -q "IMAGE_PLACEHOLDER" "${TASK_DEFINITION_FILE}"; then
+                echo "##vso[task.logissue type=error]IMAGE_PLACEHOLDER was not found in taskdef.json."
+                exit 1
+              fi
 
-            echo "Registered: ${TASK_DEFINITION_ARN}"
+              sed -i \
+                "s|IMAGE_PLACEHOLDER|${FULL_IMAGE_URI}|g" \
+                "${TASK_DEFINITION_FILE}"
 
-            aws ecs update-service \
-              --cluster "$(ecsClusterName)" \
-              --service "$(ecsServiceName)" \
-              --task-definition "${TASK_DEFINITION_ARN}" \
-              --force-new-deployment
+              echo "Deploying image: ${FULL_IMAGE_URI}"
+            displayName: Inject image tag
 
-            aws ecs wait services-stable \
-              --cluster "$(ecsClusterName)" \
-              --services "$(ecsServiceName)"
-          displayName: Authenticate and deploy to ECS
-          env:
-            AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
-            AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
-            AWS_DEFAULT_REGION: $(awsRegion)
+          - script: |
+              set -euo pipefail
+
+              echo "Checking AWS authentication..."
+
+              aws sts get-caller-identity \
+                --query '{Account:Account,Arn:Arn}' \
+                --output table
+
+              echo "Registering task definition..."
+
+              TASK_DEFINITION_ARN=$(
+                aws ecs register-task-definition \
+                  --cli-input-json \
+                  "file://$(Build.SourcesDirectory)/taskdef.json" \
+                  --query 'taskDefinition.taskDefinitionArn' \
+                  --output text
+              )
+
+              echo "Registered task definition: ${TASK_DEFINITION_ARN}"
+
+              aws ecs update-service \
+                --cluster "$(ecsClusterName)" \
+                --service "$(ecsServiceName)" \
+                --task-definition "${TASK_DEFINITION_ARN}" \
+                --force-new-deployment
+
+              echo "Waiting for the ECS service to stabilize..."
+
+              aws ecs wait services-stable \
+                --cluster "$(ecsClusterName)" \
+                --services "$(ecsServiceName)"
+
+              echo "Deployment completed."
+            displayName: Authenticate and deploy to ECS
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              AWS_DEFAULT_REGION: $(awsRegion)
