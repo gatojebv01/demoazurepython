@@ -1,0 +1,50 @@
+trigger:
+  - main # Triggers the pipeline automatically when code is pushed to the main branch
+
+resources:
+  - repo: self
+
+variables:
+  # Update these with your service connection, registry, and image details
+  dockerRegistryServiceConnection: 'service-to-registry'
+  imageRepository: 'jbpwregistrydemo'
+  containerRegistry: 'jbpwregistrydemo.azurecr.io'
+  dockerfilePath: '$(Build.SourcesDirectory)/Dockerfile'
+  tag: '$(Build.BuildId)' # Automatically numbers the image version using the build ID
+
+  # Agent VM image
+  vmImageName: 'ubuntu-latest'
+
+stages:
+  - stage: Build
+    displayName: Build and Push CI Image
+    jobs:
+      - job: Build
+        displayName: Build
+        pool:
+          vmImage: $(vmImageName)
+        steps:
+          # Optional: Lint or test your Python code before building the image
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.11'
+            displayName: 'Use Python 3.11'
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install flake8
+              # Stop the build if there are Python syntax errors or undefined names
+              flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+            displayName: 'Run Lint Checks'
+
+          # Build and push the Docker image to Azure Container Registry
+          - task: Docker@2
+            displayName: Build and Push Image to ACR
+            inputs:
+              command: 'buildAndPush'
+              repository: $(imageRepository)
+              dockerfile: $(dockerfilePath)
+              containerRegistry: $(dockerRegistryServiceConnection)
+              tags: |
+                $(tag)
+                latest
